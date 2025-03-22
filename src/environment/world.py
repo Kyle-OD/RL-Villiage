@@ -6,6 +6,7 @@ import pygame
 from src.utils.config import Config
 from src.environment.resources import ResourceManager
 from src.environment.time_system import TimeSystem
+from src.jobs.job_manager import JobManager
 
 class World:
     """
@@ -30,6 +31,7 @@ class World:
         # Initialize systems
         self.time_system = TimeSystem(config)
         self.resource_manager = ResourceManager(self, config)
+        self.job_manager = JobManager(config)
         
         # Entity tracking
         self.agents = []
@@ -55,6 +57,20 @@ class World:
         
         # Process environmental effects (weather, seasons)
         self._process_environmental_effects()
+        
+        # Update village job needs - do this once per in-game hour
+        if self.time_system.get_tick() % self.time_system.ticks_per_hour == 0:
+            self.job_manager.update_village_needs(self)
+            
+            # Evaluate job changes - once per day, at dawn
+            if self.time_system.get_hour() == 6:
+                self._evaluate_job_changes()
+    
+    def _evaluate_job_changes(self):
+        """Evaluate whether agents should change jobs based on village needs"""
+        for agent in self.agents:
+            if self.job_manager.should_change_job(agent, self):
+                self.job_manager.assign_new_job(agent, self)
     
     def _process_environmental_effects(self):
         """Process environmental effects based on season and weather"""
@@ -67,6 +83,11 @@ class World:
             self.grid[x][y].append(agent)
             self.agents.append(agent)
             agent.position = (x, y)
+            
+            # Register agent with job manager if they have a job
+            if agent.job:
+                self.job_manager.register_agent(agent)
+                
             return True
         return False
     

@@ -53,6 +53,10 @@ class Job(ABC):
         Args:
             agent: The agent to assign the job to
         """
+        # If agent already has a job, remove it first
+        if agent.job:
+            agent.job.remove_from_agent(agent)
+            
         agent.job = self
         
         # Apply skill modifiers
@@ -60,6 +64,33 @@ class Job(ABC):
             if skill_name in agent.skills:
                 # Existing skills get boosted
                 agent.skills[skill_name] *= (1.0 + modifier)
+    
+    def remove_from_agent(self, agent):
+        """
+        Remove this job from an agent.
+        
+        Args:
+            agent: The agent to remove the job from
+        """
+        if agent.job != self:
+            return
+            
+        # Remove skill modifiers
+        for skill_name, modifier in self.skill_modifiers.items():
+            if skill_name in agent.skills:
+                # Reverse the skill boost
+                agent.skills[skill_name] /= (1.0 + modifier)
+        
+        # Clear job-specific state
+        # Each job subclass can override this method to clear additional state
+        agent.job = None
+        
+        # Reset job-specific actions
+        if agent.current_action and not agent.current_action in ["wander", "go_home", "find_food", 
+                                                               "find_water", "sleeping", "find_shelter", "socialize"]:
+            agent.current_action = None
+            agent.action_target = None
+            agent.action_progress = 0.0
     
     def improve_skills(self, agent, skill_name: str, amount: float):
         """

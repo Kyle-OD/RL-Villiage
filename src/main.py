@@ -46,7 +46,12 @@ def initialize_simulation(config: Config) -> World:
     
     # Assign jobs to agents based on distribution
     job_distribution = config.get('job_distribution', {})
+    
+    # Let's use the JobManager to assign initial jobs based on distribution
+    # and village needs
     for agent in agents:
+        # First, let's assign a temporary job (just to have one)
+        # The job manager will reassign based on needs when appropriate
         job_type = random.choices(
             population=list(job_distribution.keys()),
             weights=list(job_distribution.values()),
@@ -57,6 +62,13 @@ def initialize_simulation(config: Config) -> World:
         if job_type == 'farmer':
             job = FarmerJob()
             job.assign_to_agent(agent)
+    
+    # Update village needs once after initializing all agents
+    world.job_manager.update_village_needs(world)
+    
+    # Perform an initial evaluation of job assignments
+    # This will handle changing jobs to better match village needs
+    world._evaluate_job_changes()
     
     return world
 
@@ -147,6 +159,11 @@ def print_agent_stats(world: World):
     if world.agents:
         avg_health = sum(agent.health for agent in world.agents) / len(world.agents)
         print(f"Average health: {avg_health:.1f}")
+    
+    # Print village needs from the job manager
+    print("\nVillage Needs:")
+    for need, value in world.job_manager.get_needs_summary().items():
+        print(f"  {need}: {value:.1f}")
 
 def print_simulation_summary(world: World, tick_count: int):
     """
@@ -161,7 +178,11 @@ def print_simulation_summary(world: World, tick_count: int):
     print(f"Simulation time: {world.time_system.get_date_time_string()}")
     print(f"Final agent count: {len(world.agents)}")
     
-    # More detailed summary here...
+    # Job distribution
+    print("\nFinal job distribution:")
+    job_distribution = world.job_manager.get_current_distribution()
+    for job_name, count in job_distribution.items():
+        print(f"  {job_name}: {count}")
 
 def main():
     """Main entry point for the simulation"""
