@@ -1,5 +1,7 @@
 import random
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Tuple, Any, Optional
+import pygame
+import math
 
 from src.jobs.job import Job
 from src.environment.resources import ResourceType
@@ -19,16 +21,23 @@ class FarmerJob(Job):
         
         # Set skill modifiers for this job
         self.skill_modifiers = {
-            "farming": 0.5,      # 50% boost to farming skill
-            "woodcutting": 0.2,  # 20% boost to woodcutting (for clearing fields)
-            "cooking": 0.2       # 20% boost to cooking (for food preparation)
+            "farming": 1.5,
+            "endurance": 1.2,
+            "perception": 1.0
         }
         
         # Job-specific data
         self.job_specific_data = {
-            "known_fields": [],  # List of known farming locations
-            "current_field": None,  # Currently assigned field
-            "planted_crops": {}  # Position -> (crop_type, growth_stage, plant_time)
+            "crop_fields": [],            # List of fields the farmer manages
+            "current_field_index": 0,     # Index of the current field being worked
+            "planting_progress": 0.0,     # Progress in planting (0-100)
+            "tending_progress": 0.0,      # Progress in tending (0-100)
+            "harvesting_progress": 0.0,   # Progress in harvesting (0-100)
+            "crop_growth_stages": {},     # Dict mapping field to growth stage
+            "food_harvested": 0.0,        # Amount of food harvested so far
+            "nearest_granary": None,      # Nearest granary for storing food
+            "carrying_food": 0.0,         # Amount of food currently carrying
+            "max_carry_capacity": 20.0,   # Max amount the farmer can carry
         }
     
     def decide_action(self, agent, world):
@@ -43,39 +52,41 @@ class FarmerJob(Job):
         season = world.time_system.get_season()
         
         # Check if agent has a field assigned
-        if not self.job_specific_data["current_field"]:
-            # Find a field to work on
-            agent._set_action("find_field", None)
-            return
+        if not self.job_specific_data["crop_fields"]:
+            # No fields available, wander and rest
+            return "rest"
         
-        # Check if agent is at their assigned field
-        field_pos = self.job_specific_data["current_field"]
-        if agent.position != field_pos:
-            # Go to field
-            agent._set_action("go_to_field", field_pos)
-            return
+        # Get current field
+        current_field_idx = self.job_specific_data["current_field_index"]
+        if current_field_idx >= len(self.job_specific_data["crop_fields"]):
+            current_field_idx = 0
+            self.job_specific_data["current_field_index"] = 0
         
-        # At the field, decide what to do based on season and crop state
-        field_key = f"{field_pos[0]},{field_pos[1]}"
-        if field_key in self.job_specific_data["planted_crops"]:
-            # Field has a crop
-            crop_data = self.job_specific_data["planted_crops"][field_key]
-            crop_type, growth_stage, plant_time = crop_data
-            
-            # Check if crop is ready to harvest (growth_stage >= 1.0)
-            if growth_stage >= 1.0:
-                agent._set_action("harvest_crop", field_pos)
+        current_field = self.job_specific_data["crop_fields"][current_field_idx]
+        
+        # Check crop growth stage
+        growth_stage = self.job_specific_data["crop_growth_stages"].get(str(current_field), "unplanted")
+        
+        # Prioritize actions based on crop stage
+        if growth_stage == "unplanted":
+            if agent.position != current_field:
+                return "go_to_field"
             else:
-                # Tend to the crop
-                agent._set_action("tend_crop", field_pos)
+                return "plant_crops"
+        elif growth_stage == "growing":
+            if agent.position != current_field:
+                return "go_to_field"
+            else:
+                return "tend_crops"
+        elif growth_stage == "ready_to_harvest":
+            if agent.position != current_field:
+                return "go_to_field"
+            else:
+                return "harvest_crops"
         else:
-            # Field has no crop
-            if season in ["spring", "summer"]:
-                # Good seasons for planting
-                agent._set_action("plant_crop", field_pos)
-            else:
-                # Off-season, prepare the field
-                agent._set_action("prepare_field", field_pos)
+            # Move to next field if current one is harvested
+            self.job_specific_data["current_field_index"] = (current_field_idx + 1) % len(self.job_specific_data["crop_fields"])
+            return "go_to_field"
     
     def progress_action(self, agent, world, time_delta: float):
         """
@@ -91,278 +102,246 @@ class FarmerJob(Job):
         """
         action = agent.current_action
         
-        if action == "find_field":
-            return self._progress_find_field(agent, world, time_delta)
-        elif action == "go_to_field":
+        if action == "go_to_field":
             return self._progress_go_to_field(agent, world, time_delta)
-        elif action == "plant_crop":
-            return self._progress_plant_crop(agent, world, time_delta)
-        elif action == "tend_crop":
-            return self._progress_tend_crop(agent, world, time_delta)
-        elif action == "harvest_crop":
-            return self._progress_harvest_crop(agent, world, time_delta)
-        elif action == "prepare_field":
-            return self._progress_prepare_field(agent, world, time_delta)
+        elif action == "plant_crops":
+            return self._progress_plant_crops(agent, world, time_delta)
+        elif action == "tend_crops":
+            return self._progress_tend_crops(agent, world, time_delta)
+        elif action == "harvest_crops":
+            return self._progress_harvest_crops(agent, world, time_delta)
+        elif action == "deliver_to_granary":
+            return self._progress_deliver_to_granary(agent, world, time_delta)
+        elif action == "rest":
+            return self._progress_rest(agent, world, time_delta)
         
-        return None
-    
-    def _progress_find_field(self, agent, world, time_delta: float):
-        """Find a field to work on"""
-        # If we already know fields, pick one
-        if self.job_specific_data["known_fields"]:
-            # Assign a known field
-            field_pos = random.choice(self.job_specific_data["known_fields"])
-            self.job_specific_data["current_field"] = field_pos
-            agent._set_action("go_to_field", field_pos)
-            return {"agent": agent.name, "action": "assigned_field", "location": field_pos}
-        
-        # Look for potential farming spots nearby
-        x, y = agent.position
-        neighbors = world.get_neighboring_cells(x, y, 3)
-        
-        # Check for suitable locations
-        potential_fields = []
-        for nx, ny in neighbors:
-            resources = world.resource_manager.get_resources_at(nx, ny)
-            
-            # Farmland is good near water but not on resource nodes
-            has_water_nearby = any(
-                r.resource_type == ResourceType.WATER 
-                for cx, cy in world.get_neighboring_cells(nx, ny, 2)
-                for r in world.resource_manager.get_resources_at(cx, cy)
-            )
-            
-            # Good place if near water but not on existing resources
-            if has_water_nearby and not resources:
-                potential_fields.append((nx, ny))
-        
-        if potential_fields:
-            # Found a good field
-            field_pos = random.choice(potential_fields)
-            self.job_specific_data["known_fields"].append(field_pos)
-            self.job_specific_data["current_field"] = field_pos
-            agent._set_action("go_to_field", field_pos)
-            return {"agent": agent.name, "action": "found_field", "location": field_pos}
-        
-        # No good spot found, wander and look more
-        agent._progress_wander(world, time_delta)
-        agent.action_progress = 0.5  # Still looking
         return None
     
     def _progress_go_to_field(self, agent, world, time_delta: float):
         """Go to the assigned field"""
         # Similar to agent's go_home but with field as target
-        field_pos = agent.action_target
-        if not field_pos:
-            agent.action_progress = 1.0
+        job_data = agent.job_data
+        
+        if not job_data["crop_fields"]:
             return None
             
-        current_x, current_y = agent.position
-        target_x, target_y = field_pos
-        
-        # Already at field
-        if current_x == target_x and current_y == target_y:
-            agent.action_progress = 1.0
-            return {"agent": agent.name, "action": "arrived_at_field", "location": field_pos}
-        
-        # Move towards field
-        dx = 1 if target_x > current_x else (-1 if target_x < current_x else 0)
-        dy = 1 if target_y > current_y else (-1 if target_y < current_y else 0)
-        
-        new_x, new_y = current_x + dx, current_y + dy
-        world.move_agent(agent, new_x, new_y)
-        
-        # Check if we've arrived
-        if new_x == target_x and new_y == target_y:
-            agent.action_progress = 1.0
-        else:
-            agent.action_progress = 0.5  # Still in progress
+        current_field_idx = job_data["current_field_index"]
+        if current_field_idx >= len(job_data["crop_fields"]):
+            current_field_idx = 0
+            job_data["current_field_index"] = 0
             
-        return None
+        target_field = job_data["crop_fields"][current_field_idx]
+        
+        # Simple pathfinding - move toward target
+        self._move_toward_position(agent, world, target_field)
+        
+        # Check if we've reached the field
+        if agent.position == target_field:
+            # Update action based on field state
+            growth_stage = job_data["crop_growth_stages"].get(str(target_field), "unplanted")
+            if growth_stage == "unplanted":
+                agent.current_action = "plant_crops"
+            elif growth_stage == "growing":
+                agent.current_action = "tend_crops"
+            elif growth_stage == "ready_to_harvest":
+                agent.current_action = "harvest_crops"
     
-    def _progress_plant_crop(self, agent, world, time_delta: float):
+    def _progress_plant_crops(self, agent, world, time_delta: float):
         """Plant a crop in the field"""
         # Check if we're at the field
-        field_pos = agent.action_target
-        if agent.position != field_pos:
-            agent._set_action("go_to_field", field_pos)
-            return None
+        job_data = agent.job_data
         
-        # Determine crop type based on season
-        season = world.time_system.get_season()
-        if season == "spring":
-            crop_type = "wheat"
-        elif season == "summer":
-            crop_type = "corn"
-        else:
-            crop_type = "wheat"  # Default
+        # Get current field
+        current_field_idx = job_data["current_field_index"]
+        current_field = job_data["crop_fields"][current_field_idx]
         
-        # Progress the planting
-        if agent.action_progress < 0.8:
-            # Still working on planting
-            farming_skill = agent.skills["farming"]
-            progress_amount = 0.1 + farming_skill * 0.2  # Skilled farmers plant faster
-            agent.action_progress += progress_amount
+        # Increase planting progress based on farming skill
+        farming_skill = agent.skills.get("farming", 0)
+        job_data["planting_progress"] += 5 + (farming_skill * 0.5)
+        
+        # If planting is complete
+        if job_data["planting_progress"] >= 100:
+            # Mark as planted and reset progress
+            job_data["crop_growth_stages"][str(current_field)] = "growing"
+            job_data["planting_progress"] = 0
             
-            # Skill improvement from practice
-            self.improve_skills(agent, "farming", 0.01)
+            # Move to next field
+            job_data["current_field_index"] = (current_field_idx + 1) % len(job_data["crop_fields"])
+            agent.current_action = "go_to_field"
             
-            return None
-        else:
-            # Planting complete
-            agent.action_progress = 1.0
-            
-            # Register the planted crop
-            field_key = f"{field_pos[0]},{field_pos[1]}"
-            self.job_specific_data["planted_crops"][field_key] = (
-                crop_type,
-                0.0,  # Initial growth stage
-                world.time_system.get_tick()  # Plant time
-            )
-            
-            return {
-                "agent": agent.name, 
-                "action": "planted_crop", 
-                "crop_type": crop_type,
-                "location": field_pos
-            }
+            # Animation or visual feedback
+            # Here we could add visual indicators of planting
     
-    def _progress_tend_crop(self, agent, world, time_delta: float):
+    def _progress_tend_crops(self, agent, world, time_delta: float):
         """Tend to a growing crop"""
         # Check if we're at the field
-        field_pos = agent.action_target
-        if agent.position != field_pos:
-            agent._set_action("go_to_field", field_pos)
-            return None
+        job_data = agent.job_data
         
-        # Get the crop data
-        field_key = f"{field_pos[0]},{field_pos[1]}"
-        if field_key not in self.job_specific_data["planted_crops"]:
-            # No crop here anymore
-            agent.action_progress = 1.0
-            return None
-            
-        crop_data = self.job_specific_data["planted_crops"][field_key]
-        crop_type, growth_stage, plant_time = crop_data
+        # Get current field
+        current_field_idx = job_data["current_field_index"]
+        current_field = job_data["crop_fields"][current_field_idx]
         
-        # Tend to the crop (water, weed, etc.)
-        if agent.action_progress < 0.9:
-            # Still tending
-            farming_skill = agent.skills["farming"]
-            progress_amount = 0.2 + farming_skill * 0.2
-            agent.action_progress += progress_amount
+        # Increase tending progress based on farming skill
+        farming_skill = agent.skills.get("farming", 0)
+        job_data["tending_progress"] += 3 + (farming_skill * 0.3)
+        
+        # Advance crop growth based on tending - this is simplified
+        if job_data["tending_progress"] >= 100:
+            # Crop advances to ready to harvest after sufficient tending
+            job_data["crop_growth_stages"][str(current_field)] = "ready_to_harvest"
+            job_data["tending_progress"] = 0
             
-            # Skill improvement from practice
-            self.improve_skills(agent, "farming", 0.005)
-            
-            # Improved growth from tending
-            growth_boost = 0.05 + farming_skill * 0.05
-            new_growth = min(1.0, growth_stage + growth_boost)
-            
-            # Update crop data
-            self.job_specific_data["planted_crops"][field_key] = (
-                crop_type,
-                new_growth,
-                plant_time
-            )
-            
-            return None
-        else:
-            # Tending complete
-            agent.action_progress = 1.0
-            return {
-                "agent": agent.name, 
-                "action": "tended_crop", 
-                "crop_type": crop_type,
-                "growth": self.job_specific_data["planted_crops"][field_key][1]
-            }
+            # Move to next field
+            job_data["current_field_index"] = (current_field_idx + 1) % len(job_data["crop_fields"])
+            agent.current_action = "go_to_field"
     
-    def _progress_harvest_crop(self, agent, world, time_delta: float):
+    def _progress_harvest_crops(self, agent, world, time_delta: float):
         """Harvest a mature crop"""
         # Check if we're at the field
-        field_pos = agent.action_target
-        if agent.position != field_pos:
-            agent._set_action("go_to_field", field_pos)
-            return None
+        job_data = agent.job_data
         
-        # Get the crop data
-        field_key = f"{field_pos[0]},{field_pos[1]}"
-        if field_key not in self.job_specific_data["planted_crops"]:
-            # No crop here anymore
-            agent.action_progress = 1.0
-            return None
-            
-        crop_data = self.job_specific_data["planted_crops"][field_key]
-        crop_type, growth_stage, plant_time = crop_data
+        # Get current field
+        current_field_idx = job_data["current_field_index"]
+        current_field = job_data["crop_fields"][current_field_idx]
         
-        # Harvest the crop
-        if agent.action_progress < 0.7:
-            # Still harvesting
-            farming_skill = agent.skills["farming"]
-            progress_amount = 0.15 + farming_skill * 0.15
-            agent.action_progress += progress_amount
+        # Increase harvesting progress based on farming skill
+        farming_skill = agent.skills.get("farming", 0)
+        job_data["harvesting_progress"] += 4 + (farming_skill * 0.4)
+        
+        # If harvesting is complete
+        if job_data["harvesting_progress"] >= 100:
+            # Calculate harvest yield based on farming skill and apply any modifiers
+            base_yield = random.uniform(10, 15)
+            skill_bonus = farming_skill * 0.2
+            total_yield = base_yield + skill_bonus
             
-            # Skill improvement from practice
-            self.improve_skills(agent, "farming", 0.02)
+            # Add to carrying amount
+            job_data["carrying_food"] += total_yield
+            job_data["food_harvested"] += total_yield
             
-            return None
-        else:
-            # Harvesting complete
-            agent.action_progress = 1.0
+            # Mark field as harvested
+            job_data["crop_growth_stages"][str(current_field)] = "harvested"
+            job_data["harvesting_progress"] = 0
             
-            # Determine harvest amount based on crop type and skill
-            farming_skill = agent.skills["farming"]
-            base_amount = {
-                "wheat": 20.0,
-                "corn": 25.0
-            }.get(crop_type, 15.0)
-            
-            # Skilled farmers get more yield
-            harvest_amount = base_amount * (0.8 + 0.4 * farming_skill) * growth_stage
-            
-            # Add to inventory
-            food_type = f"food_{crop_type}"
-            agent.inventory[food_type] = agent.inventory.get(food_type, 0) + harvest_amount
-            
-            # Clear the field
-            del self.job_specific_data["planted_crops"][field_key]
-            
-            return {
-                "agent": agent.name, 
-                "action": "harvested_crop", 
-                "crop_type": crop_type,
-                "amount": harvest_amount
-            }
+            # If carrying capacity reached, deliver to storage
+            if job_data["carrying_food"] >= job_data["max_carry_capacity"]:
+                agent.current_action = "deliver_to_granary"
+            else:
+                # Move to next field
+                job_data["current_field_index"] = (current_field_idx + 1) % len(job_data["crop_fields"])
+                agent.current_action = "go_to_field"
     
-    def _progress_prepare_field(self, agent, world, time_delta: float):
-        """Prepare a field for future planting"""
-        # Check if we're at the field
-        field_pos = agent.action_target
-        if agent.position != field_pos:
-            agent._set_action("go_to_field", field_pos)
-            return None
+    def _progress_deliver_to_granary(self, agent, world, time_delta: float):
+        """Progress towards delivering harvested food to a granary"""
+        job_data = agent.job_data
         
-        # Prepare the field
-        if agent.action_progress < 0.85:
-            # Still preparing
-            farming_skill = agent.skills["farming"]
-            progress_amount = 0.12 + farming_skill * 0.1
-            agent.action_progress += progress_amount
+        # If we don't have a granary, try to find one
+        if job_data["nearest_granary"] is None:
+            storage_facilities = world.storage_manager.get_facilities_by_type("Granary")
+            if storage_facilities:
+                # Find the closest granary
+                agent_pos = agent.position
+                closest_granary = min(storage_facilities, 
+                                    key=lambda f: abs(f.position[0] - agent_pos[0]) + 
+                                                abs(f.position[1] - agent_pos[1]))
+                job_data["nearest_granary"] = closest_granary
+        
+        # If we have a granary, move toward it
+        if job_data["nearest_granary"]:
+            granary = job_data["nearest_granary"]
+            granary_pos = granary.position
             
-            # Skill improvement from practice
-            self.improve_skills(agent, "farming", 0.008)
+            # Move toward granary
+            self._move_toward_position(agent, world, granary_pos)
             
-            return None
+            # If we reached the granary, deposit food
+            if agent.position == granary_pos or (
+                abs(agent.position[0] - granary_pos[0]) <= 1 and 
+                abs(agent.position[1] - granary_pos[1]) <= 1):
+                
+                # Store the food in the granary
+                food_amount = job_data["carrying_food"]
+                # Assuming food is stored as "food" resource type - adjust as needed
+                added_amount = granary.add_resource("food", food_amount)
+                
+                # If not all food was added to the granary (it might be full)
+                if added_amount < food_amount:
+                    # Add remainder to village storage
+                    remaining = food_amount - added_amount
+                    world.resource_manager.add_to_village_storage("food", remaining)
+                
+                # Reset carrying amount
+                job_data["carrying_food"] = 0.0
+                
+                # Go back to field work
+                agent.current_action = "go_to_field"
         else:
-            # Preparation complete
-            agent.action_progress = 1.0
+            # No granary found, add to village storage directly
+            world.resource_manager.add_to_village_storage("food", job_data["carrying_food"])
+            job_data["carrying_food"] = 0.0
+            agent.current_action = "go_to_field"
+    
+    def _progress_rest(self, agent, world, time_delta: float):
+        """Rest when no other tasks are available"""
+        # Simple implementation - just idle and occasionally move around
+        if random.random() < 0.2:  # 20% chance to move each tick when resting
+            # Get neighboring cells
+            neighbors = world.get_neighboring_cells(agent.position[0], agent.position[1])
+            if neighbors:
+                # Move to a random neighboring cell
+                new_pos = random.choice(neighbors)
+                world.move_agent(agent, new_pos[0], new_pos[1])
+    
+    def _move_toward_position(self, agent, world, target_pos: Tuple[int, int]):
+        """
+        Move the agent toward a target position.
+        
+        Args:
+            agent: The agent to move
+            world: The world environment
+            target_pos: The position to move toward
+        """
+        # Simple pathfinding - move toward target
+        current_x, current_y = agent.position
+        target_x, target_y = target_pos
+        
+        # Calculate direction to move (simplified)
+        dx = 0
+        dy = 0
+        
+        if current_x < target_x:
+            dx = 1
+        elif current_x > target_x:
+            dx = -1
             
-            # Mark field as prepared (could add a state to the field in a more complex implementation)
-            return {
-                "agent": agent.name, 
-                "action": "prepared_field", 
-                "location": field_pos
-            }
+        if current_y < target_y:
+            dy = 1
+        elif current_y > target_y:
+            dy = -1
+        
+        # Attempt to move (first try diagonal, then cardinal directions)
+        if dx != 0 and dy != 0:
+            # Try diagonal move
+            new_x, new_y = current_x + dx, current_y + dy
+            
+            # Check if position is valid and not occupied
+            entities = world.get_entities_at(new_x, new_y)
+            if any(entity != agent and hasattr(entity, 'blocks_movement') and entity.blocks_movement 
+                  for entity in entities):
+                # If diagonal blocked, try cardinal directions
+                if world.move_agent(agent, current_x + dx, current_y):
+                    pass  # Moved horizontally
+                elif world.move_agent(agent, current_x, current_y + dy):
+                    pass  # Moved vertically
+            else:
+                world.move_agent(agent, new_x, new_y)  # Moved diagonally
+        
+        elif dx != 0:
+            # Try horizontal move
+            world.move_agent(agent, current_x + dx, current_y)
+        elif dy != 0:
+            # Try vertical move
+            world.move_agent(agent, current_x, current_y + dy)
     
     def update_crops(self, world):
         """
@@ -391,24 +370,59 @@ class FarmerJob(Job):
         }.get(weather, 1.0)
         
         # Update each planted crop
-        for field_key, crop_data in list(self.job_specific_data["planted_crops"].items()):
-            crop_type, growth_stage, plant_time = crop_data
-            
-            # Growth rate depends on crop type
-            base_growth_rate = {
-                "wheat": 0.01,
-                "corn": 0.008
-            }.get(crop_type, 0.01)
-            
-            # Apply modifiers
-            growth_rate = base_growth_rate * season_modifier * weather_modifier
-            
-            # Update growth
-            new_growth = min(1.0, growth_stage + growth_rate)
-            
-            # Update crop data
-            self.job_specific_data["planted_crops"][field_key] = (
-                crop_type,
-                new_growth,
-                plant_time
-            ) 
+        for field_key, crop_data in list(self.job_specific_data["crop_growth_stages"].items()):
+            if crop_data == "growing":
+                # Get the field position
+                field_pos = tuple(map(int, field_key.split(',')))
+                
+                # Growth rate depends on crop type
+                base_growth_rate = {
+                    "wheat": 0.01,
+                    "corn": 0.008
+                }.get(field_pos[2], 0.01)
+                
+                # Apply modifiers
+                growth_rate = base_growth_rate * season_modifier * weather_modifier
+                
+                # Update growth
+                new_growth = min(1.0, self.job_specific_data["tending_progress"] / 100 + growth_rate)
+                
+                # Update crop data
+                self.job_specific_data["crop_growth_stages"][field_key] = new_growth
+                
+                # Check if crop is ready to harvest
+                if new_growth >= 1.0:
+                    self.job_specific_data["crop_growth_stages"][field_key] = "ready_to_harvest"
+                    self.job_specific_data["tending_progress"] = 0
+                    self.job_specific_data["harvesting_progress"] = 0
+                    self.job_specific_data["carrying_food"] = 0
+                    self.job_specific_data["food_harvested"] += 20  # Assuming a default harvest amount
+                    self.job_specific_data["crop_growth_stages"][field_key] = "harvested"
+                    world.resource_manager.add_to_village_storage("food", 20)
+            elif crop_data == "ready_to_harvest":
+                # Check if crop is ready to harvest
+                if self.job_specific_data["harvesting_progress"] >= 100:
+                    self.job_specific_data["crop_growth_stages"][field_key] = "harvested"
+                    self.job_specific_data["harvesting_progress"] = 0
+                    self.job_specific_data["carrying_food"] = 0
+                    self.job_specific_data["food_harvested"] += 20  # Assuming a default harvest amount
+                    world.resource_manager.add_to_village_storage("food", 20)
+            elif crop_data == "harvested":
+                # Remove harvested crop from growth stages
+                self.job_specific_data["crop_growth_stages"].pop(field_key)
+
+    def remove_from_agent(self, agent):
+        """
+        Handle cleanup when job is removed from an agent.
+        
+        Args:
+            agent: The agent to remove this job from
+        """
+        # Deliver any carried food to storage
+        job_data = agent.job_data
+        if job_data.get("carrying_food", 0) > 0:
+            # Try to find the world object through the agent
+            if hasattr(agent, "world") and agent.world:
+                agent.world.resource_manager.add_to_village_storage("food", job_data["carrying_food"])
+        
+        super().remove_from_agent(agent) 

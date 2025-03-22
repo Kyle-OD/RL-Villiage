@@ -1,294 +1,358 @@
 import random
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Tuple, Any, Optional
+import math
+import pygame
 
 from src.jobs.job import Job
 from src.environment.resources import ResourceType
 
 class WoodcutterJob(Job):
     """
-    Woodcutter job responsible for harvesting wood from trees.
-    Woodcutters locate forest areas, fell trees, and bring lumber back to the village.
+    Woodcutter job class. Responsible for cutting trees and providing wood resources.
+    Manages tree identification, chopping, and wood transportation.
     """
     
     def __init__(self):
-        """Initialize the woodcutter job with appropriate skills and data"""
-        super().__init__("woodcutter", "Harvests wood from forests and processes it into lumber")
+        """Initialize the woodcutter job with skill modifiers and job-specific data"""
+        super().__init__("woodcutter")
         
-        # Set skill modifiers - woodcutters get bonuses to these skills
+        # Skill modifiers for this job
         self.skill_modifiers = {
-            "woodcutting": 0.5,  # Major boost to woodcutting
-            "strength": 0.3,     # Minor boost to strength
-            "survival": 0.2      # Minor boost to survival
+            "strength": 1.2,
+            "woodcutting": 1.5,
+            "endurance": 1.1
         }
         
         # Job-specific data
         self.job_specific_data = {
-            "known_forests": [],  # Coordinates of known forest locations
-            "current_forest": None,  # Current forest being worked
-            "wood_stockpile": 0.0,  # Temporary wood being carried
-            "max_carry_capacity": 50.0,  # Maximum wood that can be carried
-            "trees_felled": 0  # Career statistic
+            "known_trees": [],           # List of known tree locations
+            "current_tree": None,        # Currently targeted tree
+            "chopping_progress": 0.0,    # Progress in chopping (0-100)
+            "wood_harvested": 0.0,       # Amount of wood harvested so far
+            "nearest_stockpile": None,   # Nearest stockpile for storing wood
+            "carrying_wood": 0.0,        # Amount of wood currently carrying
+            "max_carry_capacity": 25.0,  # Max amount the woodcutter can carry
+            "fatigue": 0.0,              # Fatigue level (0-100)
+            "trees_cut": 0               # Number of trees cut
         }
     
-    def decide_action(self, agent, world):
+    def decide_action(self, agent: Any, world: Any) -> str:
         """
-        Decide the next woodcutting action for the agent.
+        Decide the next action for the agent based on current situation.
         
         Args:
             agent: The agent performing the job
-            world: Reference to the world
-        """
-        # Check if carrying capacity reached
-        if self.job_specific_data["wood_stockpile"] >= self.job_specific_data["max_carry_capacity"]:
-            # Return to village/storage
-            agent._set_action("return_with_wood", None)
-            return
-        
-        # Check if agent has a forest assigned
-        if not self.job_specific_data["current_forest"]:
-            # Find a forest to work in
-            agent._set_action("find_forest", None)
-            return
-        
-        # Check if agent is at their assigned forest
-        forest_pos = self.job_specific_data["current_forest"]
-        if agent.position != forest_pos:
-            # Go to forest
-            agent._set_action("go_to_forest", forest_pos)
-            return
-        
-        # At the forest, check if there are trees to cut
-        # This would use resource manager to check for tree resources
-        resources = world.resource_manager.get_resources_at(*forest_pos)
-        has_trees = any(r.resource_type == ResourceType.TREE for r in resources)
-        
-        if has_trees:
-            # Chop trees
-            agent._set_action("chop_wood", forest_pos)
-        else:
-            # No trees left, find a new forest
-            self.job_specific_data["current_forest"] = None
-            agent._set_action("find_forest", None)
-    
-    def progress_action(self, agent, world, time_delta: float):
-        """
-        Progress a woodcutting action.
-        
-        Args:
-            agent: The agent performing the job
-            world: Reference to the world
-            time_delta: Time elapsed since last step
+            world: The world environment
             
         Returns:
-            Result of the action's progress if any
+            The action to perform next
         """
-        action = agent.current_action
+        job_data = agent.job_data
         
-        if action == "find_forest":
-            return self._progress_find_forest(agent, world, time_delta)
-        elif action == "go_to_forest":
-            return self._progress_go_to_forest(agent, world, time_delta)
-        elif action == "chop_wood":
-            return self._progress_chop_wood(agent, world, time_delta)
-        elif action == "return_with_wood":
-            return self._progress_return_with_wood(agent, world, time_delta)
+        # Find the nearest stockpile if we don't have one
+        if job_data["nearest_stockpile"] is None:
+            storage_facilities = world.storage_manager.get_facilities_by_type("Stockpile")
+            if storage_facilities:
+                # Find the closest stockpile
+                agent_pos = agent.position
+                closest_stockpile = min(storage_facilities, 
+                                     key=lambda f: abs(f.position[0] - agent_pos[0]) + 
+                                                 abs(f.position[1] - agent_pos[1]))
+                job_data["nearest_stockpile"] = closest_stockpile
         
-        return None
+        # If carrying wood at capacity, deliver to stockpile
+        if job_data["carrying_wood"] >= job_data["max_carry_capacity"]:
+            return "deliver_to_stockpile"
+        
+        # If fatigue is high, rest
+        if job_data["fatigue"] > 80:
+            return "rest"
+        
+        # If no current tree or tree is depleted, find a new one
+        if job_data["current_tree"] is None:
+            return "find_tree"
+        
+        # Go to current tree if not there
+        target_tree = job_data["current_tree"]
+        if abs(agent.position[0] - target_tree[0]) > 1 or abs(agent.position[1] - target_tree[1]) > 1:
+            return "go_to_tree"
+        
+        # Chop the tree
+        return "chop_tree"
     
-    def _progress_find_forest(self, agent, world, time_delta: float):
-        """Find a forest area to work in"""
-        # If we already know forest locations, pick one
-        if self.job_specific_data["known_forests"]:
-            # Assign a known forest
-            forest_pos = random.choice(self.job_specific_data["known_forests"])
-            self.job_specific_data["current_forest"] = forest_pos
-            agent._set_action("go_to_forest", forest_pos)
-            return {"agent": agent.name, "action": "assigned_forest", "location": forest_pos}
-        
-        # Look for potential forest areas nearby
-        x, y = agent.position
-        neighbors = world.get_neighboring_cells(x, y, 5)  # Search in a larger radius
-        
-        # Check for suitable forest locations
-        potential_forests = []
-        for nx, ny in neighbors:
-            resources = world.resource_manager.get_resources_at(nx, ny)
-            
-            # Look for tree resources
-            has_trees = any(r.resource_type == ResourceType.TREE for r in resources)
-            
-            if has_trees:
-                potential_forests.append((nx, ny))
-        
-        if potential_forests:
-            # Found a forest
-            forest_pos = random.choice(potential_forests)
-            self.job_specific_data["known_forests"].append(forest_pos)
-            self.job_specific_data["current_forest"] = forest_pos
-            agent._set_action("go_to_forest", forest_pos)
-            
-            # Add forest to memory
-            if "forest" not in agent.known_locations:
-                agent.known_locations["forest"] = []
-            if forest_pos not in agent.known_locations["forest"]:
-                agent.known_locations["forest"].append(forest_pos)
-                
-            return {"agent": agent.name, "action": "found_forest", "location": forest_pos}
-        
-        # No good spot found, wander and look more
-        agent._progress_wander(world, time_delta)
-        agent.action_progress = 0.5  # Still looking
-        return None
-    
-    def _progress_go_to_forest(self, agent, world, time_delta: float):
-        """Go to the assigned forest"""
-        forest_pos = agent.action_target
-        if not forest_pos:
-            agent.action_progress = 1.0
-            return None
-            
-        current_x, current_y = agent.position
-        target_x, target_y = forest_pos
-        
-        # Already at forest
-        if current_x == target_x and current_y == target_y:
-            agent.action_progress = 1.0
-            return {"agent": agent.name, "action": "arrived_at_forest", "location": forest_pos}
-        
-        # Move towards forest
-        dx = 1 if target_x > current_x else (-1 if target_x < current_x else 0)
-        dy = 1 if target_y > current_y else (-1 if target_y < current_y else 0)
-        
-        new_x, new_y = current_x + dx, current_y + dy
-        world.move_agent(agent, new_x, new_y)
-        
-        # Check if we've arrived
-        if new_x == target_x and new_y == target_y:
-            agent.action_progress = 1.0
-        else:
-            agent.action_progress = 0.5  # Still in progress
-            
-        return None
-    
-    def _progress_chop_wood(self, agent, world, time_delta: float):
-        """Chop wood from trees"""
-        # Check if we're at the forest
-        forest_pos = agent.action_target
-        if agent.position != forest_pos:
-            agent._set_action("go_to_forest", forest_pos)
-            return None
-        
-        # Get tree resources at location
-        resources = world.resource_manager.get_resources_at(*forest_pos)
-        tree_resources = [r for r in resources if r.resource_type == ResourceType.TREE]
-        
-        if not tree_resources:
-            # No trees here anymore
-            agent.action_progress = 1.0
-            self.job_specific_data["current_forest"] = None
-            return {"agent": agent.name, "action": "forest_depleted", "location": forest_pos}
-        
-        # Chop wood
-        if agent.action_progress < 0.95:
-            # Still chopping
-            woodcutting_skill = agent.skills["woodcutting"]
-            progress_amount = 0.15 + woodcutting_skill * 0.15
-            agent.action_progress += progress_amount
-            
-            # Skill improvement from practice
-            self.improve_skills(agent, "woodcutting", 0.006)
-            self.improve_skills(agent, "strength", 0.003)
-            
-            return None
-        else:
-            # Chopping complete - harvest wood from a tree
-            agent.action_progress = 1.0
-            
-            # Determine amount of wood harvested based on skill
-            woodcutting_skill = agent.skills["woodcutting"]
-            wood_amount = 10.0 + woodcutting_skill * 15.0  # 10-25 units based on skill
-            
-            # Add to stockpile
-            self.job_specific_data["wood_stockpile"] += wood_amount
-            
-            # Remove some of the tree resource (trees are renewable)
-            tree = tree_resources[0]
-            tree.quantity -= 1
-            
-            if tree.quantity <= 0:
-                # Tree has been completely felled
-                world.resource_manager.remove_resource(tree)
-                self.job_specific_data["trees_felled"] += 1
-            
-            # If we've reached capacity, head back to village
-            if self.job_specific_data["wood_stockpile"] >= self.job_specific_data["max_carry_capacity"]:
-                agent._set_action("return_with_wood", None)
-            
-            return {
-                "agent": agent.name, 
-                "action": "chopped_wood", 
-                "amount": wood_amount,
-                "total_carried": self.job_specific_data["wood_stockpile"]
-            }
-    
-    def _progress_return_with_wood(self, agent, world, time_delta: float):
-        """Return to village with harvested wood"""
-        # Ideally would return to a storage building or lumber yard
-        # For now, head home or to center of village
-        target = agent.home_position
-        
-        if not target:
-            # No home, go to center of map
-            target = (world.width // 2, world.height // 2)
-        
-        current_x, current_y = agent.position
-        target_x, target_y = target
-        
-        # Already at target
-        if current_x == target_x and current_y == target_y:
-            # Deposit the wood in village storage
-            wood_amount = self.job_specific_data["wood_stockpile"]
-            
-            # Add to village resources - in future, would add to specific storage
-            # For now, just count it as deposited
-            self.job_specific_data["wood_stockpile"] = 0.0
-            
-            agent.action_progress = 1.0
-            return {
-                "agent": agent.name, 
-                "action": "deposited_wood", 
-                "amount": wood_amount,
-                "location": agent.position
-            }
-        
-        # Move towards target
-        dx = 1 if target_x > current_x else (-1 if target_x < current_x else 0)
-        dy = 1 if target_y > current_y else (-1 if target_y < current_y else 0)
-        
-        new_x, new_y = current_x + dx, current_y + dy
-        world.move_agent(agent, new_x, new_y)
-        
-        # Check if we've arrived
-        if new_x == target_x and new_y == target_y:
-            agent.action_progress = 1.0
-        else:
-            agent.action_progress = 0.5  # Still in progress
-            
-        return None
-    
-    def remove_from_agent(self, agent):
+    def progress_action(self, agent: Any, world: Any, action_name: str):
         """
-        Remove this job from an agent, handling woodcutter-specific cleanup.
+        Progress the current action forward.
         
         Args:
-            agent: The agent to remove the job from
+            agent: The agent performing the job
+            world: The world environment
+            action_name: The name of the action to progress
         """
-        # If carrying wood, drop it
-        wood_carried = self.job_specific_data.get("wood_stockpile", 0.0)
-        if wood_carried > 0:
-            # In a more complete system, would drop wood at agent's location
-            # For now, just lose it
-            self.job_specific_data["wood_stockpile"] = 0.0
+        if action_name == "find_tree":
+            self._progress_find_tree(agent, world)
+        elif action_name == "go_to_tree":
+            self._progress_go_to_tree(agent, world)
+        elif action_name == "chop_tree":
+            self._progress_chop_tree(agent, world)
+        elif action_name == "deliver_to_stockpile":
+            self._progress_deliver_to_stockpile(agent, world)
+        elif action_name == "rest":
+            self._progress_rest(agent, world)
+    
+    def _progress_find_tree(self, agent: Any, world: Any):
+        """Find a tree to chop"""
+        job_data = agent.job_data
         
-        # Call parent remove method
+        # Use the resource manager to find trees
+        agent_pos = agent.position
+        trees = world.resource_manager.find_nearby_resources(agent_pos, "wood", 15)
+        
+        if trees:
+            # Sort by distance
+            trees.sort(key=lambda tree: abs(tree[0] - agent_pos[0]) + abs(tree[1] - agent_pos[1]))
+            
+            # Choose the closest tree or one of the closest for variety
+            closest_trees = trees[:min(3, len(trees))]
+            chosen_tree = random.choice(closest_trees)
+            
+            # Set as current tree
+            job_data["current_tree"] = chosen_tree
+            
+            # Add to known trees
+            if chosen_tree not in job_data["known_trees"]:
+                job_data["known_trees"].append(chosen_tree)
+            
+            # Go to the tree
+            agent.current_action = "go_to_tree"
+        else:
+            # No trees found, rest and look again later
+            agent.current_action = "rest"
+    
+    def _progress_go_to_tree(self, agent: Any, world: Any):
+        """Progress towards reaching a tree"""
+        job_data = agent.job_data
+        
+        # Check if we have a tree target
+        if job_data["current_tree"] is None:
+            agent.current_action = "find_tree"
+            return
+        
+        # Get the tree position
+        tree_pos = job_data["current_tree"]
+        
+        # Move toward tree
+        self._move_toward_position(agent, world, tree_pos)
+        
+        # Check if close enough to chop (adjacent)
+        if abs(agent.position[0] - tree_pos[0]) <= 1 and abs(agent.position[1] - tree_pos[1]) <= 1:
+            agent.current_action = "chop_tree"
+        
+        # Slight fatigue from walking
+        job_data["fatigue"] += 0.2
+    
+    def _progress_chop_tree(self, agent: Any, world: Any):
+        """Chop the current tree"""
+        job_data = agent.job_data
+        
+        # Make sure we have a tree
+        if job_data["current_tree"] is None:
+            agent.current_action = "find_tree"
+            return
+        
+        # Check if tree still exists (might have been depleted by another woodcutter)
+        tree_pos = job_data["current_tree"]
+        tree_exists = world.resource_manager.check_resource_at(tree_pos, "wood")
+        
+        if not tree_exists:
+            # Tree is gone, find another
+            job_data["current_tree"] = None
+            agent.current_action = "find_tree"
+            return
+        
+        # Increase chopping progress based on woodcutting skill
+        woodcutting_skill = agent.skills.get("woodcutting", 0)
+        strength_skill = agent.skills.get("strength", 0)
+        
+        progress_rate = 2.5 + (woodcutting_skill * 0.5) + (strength_skill * 0.3)
+        job_data["chopping_progress"] += progress_rate
+        
+        # Increase fatigue from chopping
+        job_data["fatigue"] += 1.5
+        
+        # If chopping is complete
+        if job_data["chopping_progress"] >= 100:
+            # Calculate wood yield based on woodcutting skill
+            base_yield = random.uniform(8, 12)
+            skill_bonus = woodcutting_skill * 0.3
+            total_yield = base_yield + skill_bonus
+            
+            # Try to harvest the wood from the world
+            harvested = world.resource_manager.harvest_resource(tree_pos, "wood", total_yield)
+            
+            if harvested > 0:
+                # Add to carrying amount
+                job_data["carrying_wood"] += harvested
+                job_data["wood_harvested"] += harvested
+                job_data["trees_cut"] += 1
+            
+            # Reset chopping progress
+            job_data["chopping_progress"] = 0
+            
+            # Check if tree is depleted
+            if not world.resource_manager.check_resource_at(tree_pos, "wood"):
+                # Tree is fully depleted, remove from known trees
+                if tree_pos in job_data["known_trees"]:
+                    job_data["known_trees"].remove(tree_pos)
+                
+                # Clear current tree
+                job_data["current_tree"] = None
+            
+            # If carrying capacity reached, deliver to storage
+            if job_data["carrying_wood"] >= job_data["max_carry_capacity"]:
+                agent.current_action = "deliver_to_stockpile"
+            elif job_data["fatigue"] > 80:
+                agent.current_action = "rest"
+            else:
+                # Find another tree
+                agent.current_action = "find_tree"
+    
+    def _progress_deliver_to_stockpile(self, agent: Any, world: Any):
+        """Progress towards delivering harvested wood to a stockpile"""
+        job_data = agent.job_data
+        
+        # If we don't have a stockpile, try to find one
+        if job_data["nearest_stockpile"] is None:
+            storage_facilities = world.storage_manager.get_facilities_by_type("Stockpile")
+            if storage_facilities:
+                # Find the closest stockpile
+                agent_pos = agent.position
+                closest_stockpile = min(storage_facilities, 
+                                      key=lambda f: abs(f.position[0] - agent_pos[0]) + 
+                                                  abs(f.position[1] - agent_pos[1]))
+                job_data["nearest_stockpile"] = closest_stockpile
+        
+        # If we have a stockpile, move toward it
+        if job_data["nearest_stockpile"]:
+            stockpile = job_data["nearest_stockpile"]
+            stockpile_pos = stockpile.position
+            
+            # Move toward stockpile
+            self._move_toward_position(agent, world, stockpile_pos)
+            
+            # If we reached the stockpile or are adjacent, deposit wood
+            if agent.position == stockpile_pos or (
+                abs(agent.position[0] - stockpile_pos[0]) <= 1 and 
+                abs(agent.position[1] - stockpile_pos[1]) <= 1):
+                
+                # Store the wood in the stockpile
+                wood_amount = job_data["carrying_wood"]
+                # Assuming wood is stored as "wood" resource type
+                added_amount = stockpile.add_resource("wood", wood_amount)
+                
+                # If not all wood was added to the stockpile (it might be full)
+                if added_amount < wood_amount:
+                    # Add remainder to village storage
+                    remaining = wood_amount - added_amount
+                    world.resource_manager.add_to_village_storage("wood", remaining)
+                
+                # Reset carrying amount and reduce fatigue slightly (taking a break)
+                job_data["carrying_wood"] = 0.0
+                job_data["fatigue"] = max(0, job_data["fatigue"] - 20)
+                
+                # Go back to finding trees
+                agent.current_action = "find_tree"
+        else:
+            # No stockpile found, add to village storage directly
+            world.resource_manager.add_to_village_storage("wood", job_data["carrying_wood"])
+            job_data["carrying_wood"] = 0.0
+            job_data["fatigue"] = max(0, job_data["fatigue"] - 20)
+            agent.current_action = "find_tree"
+    
+    def _progress_rest(self, agent: Any, world: Any):
+        """Rest to reduce fatigue"""
+        job_data = agent.job_data
+        
+        # Reduce fatigue
+        fatigue_reduction = 5 + agent.skills.get("endurance", 0) * 0.5
+        job_data["fatigue"] = max(0, job_data["fatigue"] - fatigue_reduction)
+        
+        # If rested enough, go back to work
+        if job_data["fatigue"] < 30:
+            agent.current_action = "find_tree"
+        else:
+            # Simple implementation - just idle and occasionally move around
+            if random.random() < 0.2:  # 20% chance to move each tick when resting
+                # Get neighboring cells
+                neighbors = world.get_neighboring_cells(agent.position[0], agent.position[1])
+                if neighbors:
+                    # Move to a random neighboring cell
+                    new_pos = random.choice(neighbors)
+                    world.move_agent(agent, new_pos[0], new_pos[1])
+    
+    def _move_toward_position(self, agent: Any, world: Any, target_pos: Tuple[int, int]):
+        """
+        Move the agent toward a target position.
+        
+        Args:
+            agent: The agent to move
+            world: The world environment
+            target_pos: The position to move toward
+        """
+        # Simple pathfinding - move toward target
+        current_x, current_y = agent.position
+        target_x, target_y = target_pos
+        
+        # Calculate direction to move (simplified)
+        dx = 0
+        dy = 0
+        
+        if current_x < target_x:
+            dx = 1
+        elif current_x > target_x:
+            dx = -1
+            
+        if current_y < target_y:
+            dy = 1
+        elif current_y > target_y:
+            dy = -1
+        
+        # Attempt to move (first try diagonal, then cardinal directions)
+        if dx != 0 and dy != 0:
+            # Try diagonal move
+            new_x, new_y = current_x + dx, current_y + dy
+            
+            # Check if position is valid and not occupied
+            entities = world.get_entities_at(new_x, new_y)
+            if any(entity != agent and hasattr(entity, 'blocks_movement') and entity.blocks_movement 
+                  for entity in entities):
+                # If diagonal blocked, try cardinal directions
+                if world.move_agent(agent, current_x + dx, current_y):
+                    pass  # Moved horizontally
+                elif world.move_agent(agent, current_x, current_y + dy):
+                    pass  # Moved vertically
+            else:
+                world.move_agent(agent, new_x, new_y)  # Moved diagonally
+        
+        elif dx != 0:
+            # Try horizontal move
+            world.move_agent(agent, current_x + dx, current_y)
+        elif dy != 0:
+            # Try vertical move
+            world.move_agent(agent, current_x, current_y + dy)
+    
+    def remove_from_agent(self, agent: Any):
+        """
+        Handle cleanup when job is removed from an agent.
+        
+        Args:
+            agent: The agent to remove this job from
+        """
+        # Deliver any carried wood to storage
+        job_data = agent.job_data
+        if job_data.get("carrying_wood", 0) > 0:
+            # Try to find the world object through the agent
+            if hasattr(agent, "world") and agent.world:
+                agent.world.resource_manager.add_to_village_storage("wood", job_data["carrying_wood"])
+        
         super().remove_from_agent(agent) 

@@ -1,116 +1,94 @@
 import random
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Tuple, Optional, Any
 
 from src.jobs.job import Job
 from src.environment.resources import ResourceType
+from src.environment.threats import Threat, ThreatType, ThreatStatus
 
 class GuardJob(Job):
     """
-    Guard job responsible for village security.
-    Guards patrol, defend against threats, and engage in combat when necessary.
+    Guard job responsible for village security, patrolling, and combat.
+    Guards detect and engage threats to protect the village.
     """
     
     def __init__(self):
         """Initialize the guard job with appropriate skills and data"""
-        super().__init__("guard", "Protects the village and its inhabitants")
+        super().__init__("guard", "Protects the village from threats and maintains security")
         
         # Set skill modifiers - guards get bonuses to these skills
         self.skill_modifiers = {
-            "combat": 0.8,       # Major boost to combat
-            "perception": 0.3,   # Moderate boost to perception
-            "strength": 0.5      # Good boost to strength
+            "combat": 0.6,      # Major boost to combat
+            "perception": 0.3,  # Moderate boost to perception
+            "strength": 0.3     # Moderate boost to strength
         }
         
         # Job-specific data
         self.job_specific_data = {
-            "patrol_points": [],       # Points for guard to patrol between
-            "current_patrol_point": 0, # Index of current patrol point
-            "village_center": None,    # Center of the village to defend
-            "current_threat": None,    # Current threat being addressed
-            "threat_level": 0.0,       # Current threat level (0-100)
-            "threats_defeated": 0,     # Number of threats defeated
-            "hours_patrolled": 0.0,    # Total hours spent patrolling
-            "on_duty": True            # Whether guard is currently on duty
-        }
-        
-        # Combat equipment and stats
-        self.job_specific_data["combat"] = {
-            "has_weapon": False,      # Whether guard has a weapon
-            "weapon_quality": 0.0,    # Quality of weapon if any
-            "damage_dealt": 0.0,      # Total damage dealt to threats
-            "damage_taken": 0.0       # Total damage taken from threats
+            "patrol_points": [],         # Points to patrol between
+            "current_patrol_point": 0,   # Index of current patrol point
+            "village_center": None,      # Reference point for patrols
+            "current_threat": None,      # Current threat being engaged
+            "threat_level": 0.0,         # Perceived threat level (0-10)
+            "combat_equipment": {        # Equipment modifiers
+                "has_weapon": False,      # Has a proper weapon
+                "has_armor": False,       # Has protective gear
+                "weapon_quality": 0.0,    # Quality of weapon (0-1)
+                "armor_quality": 0.0      # Quality of armor (0-1)
+            },
+            "threats_defeated": 0        # Career statistic
         }
     
     def decide_action(self, agent, world):
         """
-        Decide the next guard action for the agent.
+        Decide the next security action for the agent.
         
         Args:
             agent: The agent performing the job
             world: Reference to the world
         """
-        # Set up village center if not set
-        if not self.job_specific_data["village_center"]:
-            self.job_specific_data["village_center"] = (world.width // 2, world.height // 2)
-        
-        # Set up patrol points if none exist
+        # Ensure we have patrol points set up
         if not self.job_specific_data["patrol_points"]:
             self._setup_patrol_points(agent, world)
-        
-        # First priority: handle active threats if any
-        if self.job_specific_data["current_threat"]:
-            threat = self.job_specific_data["current_threat"]
             
-            # Check if we're at the threat location
-            if agent.position == threat["position"]:
-                agent._set_action("engage_threat", threat)
+        # Set village center
+        if not self.job_specific_data["village_center"]:
+            self.job_specific_data["village_center"] = world.village_center
+        
+        # Check for active threat - highest priority
+        current_threat = self.job_specific_data["current_threat"]
+        if current_threat and current_threat.status == ThreatStatus.ATTACKING:
+            # If not at threat, go to it
+            if agent.position != current_threat.position:
+                agent._set_action("go_to_threat", current_threat)
             else:
-                agent._set_action("go_to_threat", threat["position"])
+                # At threat, engage it
+                agent._set_action("engage_threat", current_threat)
             return
         
-        # Second priority: detect threats nearby
-        threats = self._detect_threats(agent, world)
-        if threats:
-            # Choose the highest priority threat
-            threat = self._prioritize_threats(threats)
-            self.job_specific_data["current_threat"] = threat
-            
-            # Go to the threat
-            agent._set_action("go_to_threat", threat["position"])
-            return
+        # Check for nearby threats if not already engaged
+        if not current_threat:
+            threats = self._detect_threats(agent, world)
+            if threats:
+                # Prioritize and engage the most significant threat
+                priority_threat = self._prioritize_threats(threats)
+                self.job_specific_data["current_threat"] = priority_threat
+                agent._set_action("go_to_threat", priority_threat)
+                return
         
-        # Third priority: patrol if on duty
-        if self.job_specific_data["on_duty"]:
-            # Get current patrol point
-            patrol_idx = self.job_specific_data["current_patrol_point"]
-            if patrol_idx >= len(self.job_specific_data["patrol_points"]):
-                patrol_idx = 0
-                self.job_specific_data["current_patrol_point"] = 0
-            
-            patrol_point = self.job_specific_data["patrol_points"][patrol_idx]
-            
-            # Check if we're at the patrol point
-            if agent.position == patrol_point:
-                # Move to next patrol point
-                self.job_specific_data["current_patrol_point"] = (patrol_idx + 1) % len(self.job_specific_data["patrol_points"])
-                next_point = self.job_specific_data["patrol_points"][self.job_specific_data["current_patrol_point"]]
-                agent._set_action("patrol_to", next_point)
-            else:
-                agent._set_action("patrol_to", patrol_point)
-            return
-        
-        # Fourth priority: rest at home or village center if off duty
-        if not self.job_specific_data["on_duty"]:
-            rest_loc = agent.home_position if agent.home_position else self.job_specific_data["village_center"]
-            
-            if agent.position == rest_loc:
+        # Regular patrol if no immediate threats
+        if agent.needs["energy"] < 30.0:
+            # Need to rest if energy is low
+            if agent.position == agent.home_position or agent.position == self.job_specific_data["village_center"]:
+                # Already at a good rest place
                 agent._set_action("rest", None)
             else:
-                agent._set_action("go_to_rest", rest_loc)
-            return
-        
-        # Default: patrol village center
-        agent._set_action("patrol_to", self.job_specific_data["village_center"])
+                # Go to a rest location
+                rest_pos = agent.home_position if agent.home_position else self.job_specific_data["village_center"]
+                agent._set_action("go_to_rest", rest_pos)
+        else:
+            # Continue patrolling
+            next_point = self.job_specific_data["patrol_points"][self.job_specific_data["current_patrol_point"]]
+            agent._set_action("patrol_to", next_point)
     
     def progress_action(self, agent, world, time_delta: float):
         """
@@ -139,25 +117,34 @@ class GuardJob(Job):
         
         return None
     
+    def detect_threat(self, agent, threat):
+        """
+        Directly set a threat for this guard to respond to.
+        
+        Args:
+            agent: The agent responding
+            threat: The threat to respond to
+        """
+        self.job_specific_data["current_threat"] = threat
+        agent._set_action("go_to_threat", threat)
+        agent.action_progress = 0.0
+    
     def _setup_patrol_points(self, agent, world):
         """Set up patrol points around the village"""
-        village_center = self.job_specific_data["village_center"]
-        if not village_center:
-            village_center = (world.width // 2, world.height // 2)
-            self.job_specific_data["village_center"] = village_center
+        # Get village center
+        center_x, center_y = world.village_center
         
-        # Create patrol points in a circle around the village center
-        cx, cy = village_center
-        radius = min(10, min(world.width, world.height) // 4)  # Reasonable patrol radius
-        num_points = random.randint(4, 8)  # Number of patrol points
+        # Create patrol circuit around center with some randomness
+        num_points = random.randint(3, 6)
+        radius = random.randint(5, 15)  # Distance from center
         
         patrol_points = []
         for i in range(num_points):
-            angle = (i / num_points) * 2 * 3.14159  # Convert to radians
-            px = int(cx + radius * 0.8 * 1.3 * (0.7 + 0.3 * random.random()) * 
-                   (1 if random.random() > 0.5 else -1))
-            py = int(cy + radius * 0.8 * (0.7 + 0.3 * random.random()) * 
-                   (1 if random.random() > 0.5 else -1))
+            angle = (2 * 3.14159 * i) / num_points  # Radians
+            
+            # Calculate point with some randomness
+            px = center_x + int(radius * 1.5 * (0.8 + 0.4 * random.random()) * (random.random() - 0.5 + 2 * (angle % 3.14159)))
+            py = center_y + int(radius * (0.8 + 0.4 * random.random()) * (random.random() - 0.5 + 2 * ((angle + 1.57) % 3.14159)))
             
             # Ensure within world bounds
             px = max(0, min(world.width - 1, px))
@@ -165,90 +152,90 @@ class GuardJob(Job):
             
             patrol_points.append((px, py))
         
-        # Add village center as a patrol point
-        patrol_points.append(village_center)
-        
-        # Set patrol points and start with a random one
         self.job_specific_data["patrol_points"] = patrol_points
-        self.job_specific_data["current_patrol_point"] = random.randint(0, len(patrol_points) - 1)
+        self.job_specific_data["current_patrol_point"] = 0
+        self.job_specific_data["village_center"] = (center_x, center_y)
     
     def _detect_threats(self, agent, world):
-        """Detect nearby threats"""
-        # In a more developed system, this would detect actual threat entities
-        # For now, return placeholder threats for demonstration
+        """
+        Detect threats in the vicinity.
         
-        # Guard's perception affects threat detection radius
-        perception_skill = agent.skills["perception"]
-        detection_radius = 5 + int(perception_skill * 5)  # 5-10 cells based on skill
-        
-        # For simulation, randomly generate threats with low probability
-        detected_threats = []
-        
-        # Only detect threats with 2% chance per step (to avoid constant threats)
-        if random.random() < 0.02:
-            # Get neighboring cells to check for threats
-            x, y = agent.position
-            neighbors = world.get_neighboring_cells(x, y, detection_radius)
+        Args:
+            agent: The agent doing the detecting
+            world: Reference to the world
             
-            # Randomly select a cell for a potential threat
-            if neighbors and random.random() < 0.3:  # 30% chance if we're checking
-                threat_pos = random.choice(neighbors)
-                
-                # Create a threat object
-                threat = {
-                    "id": f"threat_{random.randint(1000, 9999)}",
-                    "type": random.choice(["bandit", "wolf", "monster"]),
-                    "position": threat_pos,
-                    "health": random.uniform(50.0, 100.0),
-                    "strength": random.uniform(0.3, 0.8),
-                    "damage": random.uniform(5.0, 15.0),
-                    "priority": random.uniform(0.5, 1.0)
-                }
-                
-                detected_threats.append(threat)
+        Returns:
+            List of detected threats
+        """
+        # Use perception skill to determine detection range
+        detection_range = 5 + int(agent.skills["perception"] * 10)  # 5-15 cells
         
-        return detected_threats
+        # Get threats within range
+        threats = world.get_threats_in_range(agent.position, detection_range)
+        
+        # Only attacking threats are relevant
+        return [t for t in threats if t.status == ThreatStatus.ATTACKING]
     
     def _prioritize_threats(self, threats):
-        """Prioritize threats based on their danger level"""
+        """
+        Prioritize which threat to engage first.
+        
+        Args:
+            threats: List of threats
+            
+        Returns:
+            Highest priority threat
+        """
         if not threats:
             return None
-        
-        # Sort threats by priority (higher is more dangerous)
-        sorted_threats = sorted(threats, key=lambda t: t["priority"], reverse=True)
-        return sorted_threats[0]
+            
+        # For now, just take the first one
+        # In future, could prioritize based on threat type, distance to village center, etc.
+        return threats[0]
     
     def _progress_patrol_to(self, agent, world, time_delta: float):
-        """Progress movement towards a patrol point"""
-        patrol_pos = agent.action_target
-        if not patrol_pos:
-            agent.action_progress = 1.0
-            return None
-            
+        """Progress patrolling to the next point"""
+        patrol_target = agent.action_target
+        if not patrol_target:
+            # If no target, use village center
+            patrol_target = self.job_specific_data["village_center"]
+        
         current_x, current_y = agent.position
-        target_x, target_y = patrol_pos
+        target_x, target_y = patrol_target
         
-        # Already at patrol position
+        # Already at target
         if current_x == target_x and current_y == target_y:
+            # Move to next patrol point
+            self.job_specific_data["current_patrol_point"] = (
+                self.job_specific_data["current_patrol_point"] + 1
+            ) % len(self.job_specific_data["patrol_points"])
+            
             agent.action_progress = 1.0
-            
-            # Update patrol stats
-            self.job_specific_data["hours_patrolled"] += time_delta
-            
-            # Skill improvement from practice
-            self.improve_skills(agent, "perception", 0.004)
-            
-            return {"agent": agent.name, "action": "patrol_checkpoint_reached", "location": patrol_pos}
+            return {"agent": agent.name, "action": "patrol_checkpoint_reached"}
         
-        # Move towards patrol position
+        # Move towards target
         dx = 1 if target_x > current_x else (-1 if target_x < current_x else 0)
         dy = 1 if target_y > current_y else (-1 if target_y < current_y else 0)
         
+        # Slight chance to pause and look around
+        if random.random() < 0.2:
+            # Perception skill check - might detect threats
+            perception_check = random.random() < agent.skills["perception"] * 0.3
+            if perception_check:
+                threats = self._detect_threats(agent, world)
+                if threats:
+                    priority_threat = self._prioritize_threats(threats)
+                    self.job_specific_data["current_threat"] = priority_threat
+                    agent._set_action("go_to_threat", priority_threat)
+                    return {"agent": agent.name, "action": "threat_detected", "threat": priority_threat.threat_type.name}
+            
+            # Just pause briefly
+            agent.action_progress = 0.5
+            return {"agent": agent.name, "action": "patrolling_pause"}
+        
+        # Move agent
         new_x, new_y = current_x + dx, current_y + dy
         world.move_agent(agent, new_x, new_y)
-        
-        # Update patrol stats (partial credit for moving)
-        self.job_specific_data["hours_patrolled"] += time_delta * 0.5
         
         # Check if we've arrived
         if new_x == target_x and new_y == target_y:
@@ -256,42 +243,47 @@ class GuardJob(Job):
         else:
             agent.action_progress = 0.5  # Still in progress
             
+        # Skill improvements from practice
+        self.improve_skills(agent, "perception", 0.002)
+            
         return None
     
     def _progress_rest(self, agent, world, time_delta: float):
-        """Rest while off duty"""
-        # Resting helps recovery
-        agent.health = min(100.0, agent.health + time_delta * 2.0)
-        agent.energy = min(100.0, agent.energy + time_delta * 5.0)
+        """Rest to regain energy"""
+        if agent.action_progress < 1.0:
+            # Recovery based on time passed
+            recovery_amount = 10.0 * time_delta
+            agent.needs["energy"] = min(100.0, agent.needs["energy"] + recovery_amount)
+            
+            # Progress the rest action
+            agent.action_progress += 0.2
+            
+            if agent.needs["energy"] >= 80.0:
+                # Sufficiently rested
+                agent.action_progress = 1.0
+                
+            return None
         
-        # Progress rest action
-        agent.action_progress += time_delta * 0.1
-        
-        # Switch back to on duty after full rest
-        if agent.action_progress >= 1.0 or (agent.health > 90.0 and agent.energy > 90.0):
-            agent.action_progress = 1.0
-            self.job_specific_data["on_duty"] = True
-            return {"agent": agent.name, "action": "rest_complete", "status": "back_on_duty"}
-        
-        return None
+        # Rest complete
+        return {"agent": agent.name, "action": "rest_complete"}
     
     def _progress_go_to_rest(self, agent, world, time_delta: float):
-        """Go to rest location"""
+        """Go to a rest location"""
         rest_pos = agent.action_target
         if not rest_pos:
-            agent.action_progress = 1.0
-            return None
+            # Default to village center
+            rest_pos = self.job_specific_data["village_center"]
             
         current_x, current_y = agent.position
         target_x, target_y = rest_pos
         
-        # Already at rest position
+        # Already at target
         if current_x == target_x and current_y == target_y:
-            agent.action_progress = 1.0
             agent._set_action("rest", None)
-            return {"agent": agent.name, "action": "arrived_at_rest_location", "location": rest_pos}
+            agent.action_progress = 0.0
+            return {"agent": agent.name, "action": "arrived_at_rest"}
         
-        # Move towards rest position
+        # Move towards target
         dx = 1 if target_x > current_x else (-1 if target_x < current_x else 0)
         dy = 1 if target_y > current_y else (-1 if target_y < current_y else 0)
         
@@ -300,33 +292,34 @@ class GuardJob(Job):
         
         # Check if we've arrived
         if new_x == target_x and new_y == target_y:
-            agent.action_progress = 1.0
+            agent._set_action("rest", None)
+            agent.action_progress = 0.0
         else:
             agent.action_progress = 0.5  # Still in progress
             
         return None
     
     def _progress_go_to_threat(self, agent, world, time_delta: float):
-        """Go to a detected threat"""
-        if not self.job_specific_data["current_threat"]:
+        """Move toward a detected threat"""
+        threat = agent.action_target
+        
+        # Ensure threat is still valid
+        if not threat or threat.status != ThreatStatus.ATTACKING:
+            # Threat no longer active
+            self.job_specific_data["current_threat"] = None
             agent.action_progress = 1.0
-            return None
-            
-        threat_pos = agent.action_target
-        if not threat_pos:
-            agent.action_progress = 1.0
-            return None
-            
+            return {"agent": agent.name, "action": "threat_neutralized"}
+        
         current_x, current_y = agent.position
-        target_x, target_y = threat_pos
+        target_x, target_y = threat.position
         
-        # Already at threat position
+        # Already at target
         if current_x == target_x and current_y == target_y:
-            agent.action_progress = 1.0
-            agent._set_action("engage_threat", self.job_specific_data["current_threat"])
-            return {"agent": agent.name, "action": "arrived_at_threat", "location": threat_pos}
+            agent._set_action("engage_threat", threat)
+            agent.action_progress = 0.0
+            return {"agent": agent.name, "action": "arrived_at_threat"}
         
-        # Move towards threat (faster than normal patrol movement)
+        # Move towards target (faster than normal movement)
         dx = 1 if target_x > current_x else (-1 if target_x < current_x else 0)
         dy = 1 if target_y > current_y else (-1 if target_y < current_y else 0)
         
@@ -335,7 +328,8 @@ class GuardJob(Job):
         
         # Check if we've arrived
         if new_x == target_x and new_y == target_y:
-            agent.action_progress = 1.0
+            agent._set_action("engage_threat", threat)
+            agent.action_progress = 0.0
         else:
             agent.action_progress = 0.5  # Still in progress
             
@@ -344,95 +338,92 @@ class GuardJob(Job):
     def _progress_engage_threat(self, agent, world, time_delta: float):
         """Engage in combat with a threat"""
         threat = agent.action_target
-        if not threat or not self.job_specific_data["current_threat"]:
-            agent.action_progress = 1.0
+        
+        # Ensure threat is still valid
+        if not threat or threat.status != ThreatStatus.ATTACKING:
+            # Threat no longer active
             self.job_specific_data["current_threat"] = None
-            return {"agent": agent.name, "action": "threat_engagement_ended", "reason": "no_threat"}
+            agent.action_progress = 1.0
+            return {"agent": agent.name, "action": "threat_neutralized"}
         
-        # In a full implementation, this would have turn-based or real-time combat
-        # For now, simulate combat with skill checks
+        # Check if at threat position
+        if agent.position != threat.position:
+            agent._set_action("go_to_threat", threat)
+            return {"agent": agent.name, "action": "pursuing_threat"}
         
-        # Combat lasts multiple steps
-        if agent.action_progress < 0.9:
-            # Calculate combat effectiveness based on skills
+        # Combat logic
+        if agent.action_progress < 0.95:
+            # Calculate combat effectiveness
             combat_skill = agent.skills["combat"]
-            strength_skill = agent.skills["strength"]
+            strength = agent.skills["strength"]
             
-            # Determine if guard has a weapon
-            has_weapon = self.job_specific_data["combat"]["has_weapon"]
-            weapon_quality = self.job_specific_data["combat"]["weapon_quality"]
+            # Equipment bonuses
+            equipment = self.job_specific_data["combat_equipment"]
+            weapon_bonus = 1.0 + (equipment["weapon_quality"] * 0.5) if equipment["has_weapon"] else 0.5
+            armor_bonus = 1.0 + (equipment["armor_quality"] * 0.5) if equipment["has_armor"] else 0.5
             
-            # Combat effectiveness
-            guard_effectiveness = 0.3 + (combat_skill * 0.5) + (strength_skill * 0.2)
-            if has_weapon:
-                guard_effectiveness *= (1.0 + weapon_quality * 0.5)
+            # Check for weapons in village resources
+            village_resources = world.resource_manager.get_village_resources()
+            weapons_available = village_resources.get(ResourceType.WEAPONS, 0)
             
-            # Threat effectiveness
-            threat_effectiveness = threat["strength"]
+            # If we don't have a weapon but village has some, acquire one
+            if not equipment["has_weapon"] and weapons_available > 0:
+                took = world.resource_manager.take_from_village_storage(ResourceType.WEAPONS, 1)
+                if took > 0:
+                    equipment["has_weapon"] = True
+                    equipment["weapon_quality"] = 0.7 + (random.random() * 0.3)  # 0.7-1.0 quality
+                    weapon_bonus = 1.0 + (equipment["weapon_quality"] * 0.5)
             
-            # Calculate damage
-            damage_to_threat = 10.0 * guard_effectiveness * time_delta * random.uniform(0.8, 1.2)
-            damage_to_guard = threat["damage"] * threat_effectiveness * time_delta * random.uniform(0.7, 1.0)
+            # Calculate damage done to threat
+            base_damage = (combat_skill * 3.0 + strength * 2.0) * weapon_bonus * time_delta
             
-            # Apply damage
-            threat["health"] -= damage_to_threat
-            agent.health -= damage_to_guard
+            # Apply damage to threat
+            threat_defeated = world.threat_manager.damage_threat(threat.id, base_damage)
             
-            # Log damage for statistics
-            self.job_specific_data["combat"]["damage_dealt"] += damage_to_threat
-            self.job_specific_data["combat"]["damage_taken"] += damage_to_guard
+            # Calculate damage received (if any)
+            if random.random() < 0.3:  # 30% chance to be hit
+                damage_received = threat.base_strength * threat.strength * 0.1 * time_delta / armor_bonus
+                agent.health -= damage_received
+                
+                # Critical condition check
+                if agent.health < 30.0:
+                    # Chance to retreat if badly injured
+                    if random.random() < 0.3:
+                        # Retreat to village center
+                        self.job_specific_data["current_threat"] = None
+                        agent._set_action("go_to_rest", self.job_specific_data["village_center"])
+                        return {"agent": agent.name, "action": "retreating", "health": agent.health}
             
-            # Skill improvement from combat
-            self.improve_skills(agent, "combat", 0.01)
-            self.improve_skills(agent, "strength", 0.005)
+            # Skill improvements from combat
+            self.improve_skills(agent, "combat", 0.005)
+            self.improve_skills(agent, "strength", 0.003)
             
-            # Check if combat is over
-            if threat["health"] <= 0:
-                # Threat defeated
-                agent.action_progress = 1.0
+            # Progress the combat action
+            progress_rate = 0.1 + (combat_skill * 0.1)  # Higher skill = faster resolution
+            agent.action_progress += progress_rate
+            
+            # Energy cost of combat
+            agent.needs["energy"] -= 2.0 * time_delta
+            
+            # Check if threat was defeated
+            if threat_defeated:
                 self.job_specific_data["threats_defeated"] += 1
                 self.job_specific_data["current_threat"] = None
-                
+                agent.action_progress = 1.0
                 return {
                     "agent": agent.name, 
                     "action": "threat_defeated", 
-                    "threat_type": threat["type"],
-                    "damage_dealt": damage_to_threat,
-                    "damage_taken": damage_to_guard
+                    "threat_type": threat.threat_type.name,
+                    "threats_defeated": self.job_specific_data["threats_defeated"]
                 }
-            
-            if agent.health <= 20.0:
-                # Guard retreating due to low health
-                agent.action_progress = 1.0
-                self.job_specific_data["on_duty"] = False  # Go off duty to rest
                 
-                return {
-                    "agent": agent.name, 
-                    "action": "guard_retreating", 
-                    "health": agent.health,
-                    "threat_remaining_health": threat["health"]
-                }
-            
-            # Continue combat
-            agent.action_progress += time_delta * 0.4
-            return {
-                "agent": agent.name, 
-                "action": "fighting_threat", 
-                "damage_dealt": damage_to_threat,
-                "damage_taken": damage_to_guard,
-                "threat_health": threat["health"]
-            }
+            return None
         else:
-            # Combat timeout - threat escapes
-            agent.action_progress = 1.0
+            # Combat complete but threat not defeated
+            # Likely the threat fled or was already defeated by others
             self.job_specific_data["current_threat"] = None
-            
-            return {
-                "agent": agent.name, 
-                "action": "threat_escaped", 
-                "threat_type": threat["type"],
-                "remaining_health": threat["health"]
-            }
+            agent.action_progress = 1.0
+            return {"agent": agent.name, "action": "combat_complete"}
     
     def remove_from_agent(self, agent):
         """
@@ -443,6 +434,12 @@ class GuardJob(Job):
         """
         # Clear current threat
         self.job_specific_data["current_threat"] = None
+        
+        # Return equipment to village if any
+        equipment = self.job_specific_data["combat_equipment"]
+        if equipment["has_weapon"]:
+            # Would add weapon back to village storage in a complete system
+            pass
         
         # Call parent remove method
         super().remove_from_agent(agent) 
