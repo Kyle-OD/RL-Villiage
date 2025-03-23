@@ -14,7 +14,7 @@ class WoodcutterJob(Job):
     
     def __init__(self):
         """Initialize the woodcutter job with skill modifiers and job-specific data"""
-        super().__init__("woodcutter")
+        super().__init__("woodcutter", "Cuts trees and provides wood resources for the village")
         
         # Skill modifiers for this job
         self.skill_modifiers = {
@@ -80,15 +80,18 @@ class WoodcutterJob(Job):
         # Chop the tree
         return "chop_tree"
     
-    def progress_action(self, agent: Any, world: Any, action_name: str):
+    def progress_action(self, agent: Any, world: Any, time_delta: float):
         """
         Progress the current action forward.
         
         Args:
             agent: The agent performing the job
             world: The world environment
-            action_name: The name of the action to progress
+            time_delta: Time elapsed since last step
         """
+        # Get the current action from the agent
+        action_name = agent.current_action
+        
         if action_name == "find_tree":
             self._progress_find_tree(agent, world)
         elif action_name == "go_to_tree":

@@ -87,6 +87,15 @@ class StorageFacility:
             return 100.0
         return (current_total / self.capacity) * 100.0
     
+    def get_contents(self) -> Dict:
+        """
+        Get the contents of the storage facility.
+        
+        Returns:
+            Dictionary of resource types and amounts
+        """
+        return self.resources.copy()
+    
     def damage(self, amount: float) -> float:
         """
         Apply damage to the facility.
@@ -418,6 +427,19 @@ class StorageManager:
                 nearby.append(facility)
                 
         return nearby
+    
+    def get_facilities_by_type(self, facility_type: str) -> List[StorageFacility]:
+        """
+        Get all storage facilities of a specific type.
+        
+        Args:
+            facility_type: Type name of the facility (e.g., 'Warehouse', 'Granary', 'Stockpile', 'Armory')
+            
+        Returns:
+            List of matching storage facilities
+        """
+        return [facility for facility in self.storage_facilities 
+                if facility.__class__.__name__ == facility_type]
     
     def render(self, surface: pygame.Surface):
         """Render all storage facilities"""

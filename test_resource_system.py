@@ -12,11 +12,11 @@ import sys
 from typing import List, Dict, Any, Tuple
 
 # Import the required modules
-from src.environment.resources import ResourceManager
+from src.environment.resources import ResourceManager, ResourceType, Resource
 from src.environment.world import World
 from src.environment.storage import StorageManager, Warehouse, Granary, Stockpile, Armory
 from src.environment.threats import ThreatManager
-from src.agent.agent import Agent
+from src.agents.agent import Agent
 from src.utils.config import Config
 from src.jobs.job_manager import JobManager
 from src.jobs import (
@@ -37,8 +37,8 @@ class Simulation:
         
         # Set up config
         self.config = Config()
-        self.config.world_width = 100
-        self.config.world_height = 100
+        self.config.set('world_width', 100)
+        self.config.set('world_height', 100)
         
         # Set up the world
         self.world = World(self.config)
@@ -80,7 +80,14 @@ class Simulation:
             # Avoid placing too close to village center
             if abs(x - self.world.village_center[0]) > 15 or abs(y - self.world.village_center[1]) > 15:
                 amount = random.uniform(50, 100)
-                self.world.resource_manager.add_resource_node((x, y), "wood", amount)
+                resource = Resource(
+                    resource_type=ResourceType.TREE,
+                    position=(x, y),
+                    quantity=amount,
+                    max_quantity=amount * 1.2,
+                    regrowth_rate=0.1
+                )
+                self.world.resource_manager.add_resource(resource)
         
         # Add stone
         for _ in range(num_resource_nodes // 2):
@@ -88,7 +95,14 @@ class Simulation:
             y = random.randint(10, self.config.world_height - 10)
             if abs(x - self.world.village_center[0]) > 20 or abs(y - self.world.village_center[1]) > 20:
                 amount = random.uniform(40, 80)
-                self.world.resource_manager.add_resource_node((x, y), "stone", amount)
+                resource = Resource(
+                    resource_type=ResourceType.STONE,
+                    position=(x, y),
+                    quantity=amount,
+                    max_quantity=amount,  # Stone doesn't regrow
+                    regrowth_rate=0.0
+                )
+                self.world.resource_manager.add_resource(resource)
         
         # Add iron ore
         for _ in range(num_resource_nodes // 3):
@@ -96,35 +110,56 @@ class Simulation:
             y = random.randint(10, self.config.world_height - 10)
             if abs(x - self.world.village_center[0]) > 25 or abs(y - self.world.village_center[1]) > 25:
                 amount = random.uniform(30, 60)
-                self.world.resource_manager.add_resource_node((x, y), "iron_ore", amount)
+                resource = Resource(
+                    resource_type=ResourceType.IRON_ORE,
+                    position=(x, y),
+                    quantity=amount,
+                    max_quantity=amount,  # Ore doesn't regrow
+                    regrowth_rate=0.0
+                )
+                self.world.resource_manager.add_resource(resource)
                 
-        # Add copper ore
+        # Add copper ore (using CLAY as substitute since there's no COPPER_ORE)
         for _ in range(num_resource_nodes // 4):
             x = random.randint(10, self.config.world_width - 10)
             y = random.randint(10, self.config.world_height - 10)
             if abs(x - self.world.village_center[0]) > 25 or abs(y - self.world.village_center[1]) > 25:
                 amount = random.uniform(20, 50)
-                self.world.resource_manager.add_resource_node((x, y), "copper_ore", amount)
+                resource = Resource(
+                    resource_type=ResourceType.CLAY,  # Using CLAY as a substitute for copper
+                    position=(x, y),
+                    quantity=amount,
+                    max_quantity=amount,  # Ore doesn't regrow
+                    regrowth_rate=0.0
+                )
+                self.world.resource_manager.add_resource(resource)
         
-        # Add food (farmland)
+        # Add food (farmland - using FOOD_WHEAT)
         for _ in range(num_resource_nodes // 2):
             x = random.randint(10, self.config.world_width - 10)
             y = random.randint(10, self.config.world_height - 10)
             # Place closer to village for farms
             if 10 < abs(x - self.world.village_center[0]) < 30 and 10 < abs(y - self.world.village_center[1]) < 30:
                 amount = random.uniform(30, 70)
-                self.world.resource_manager.add_resource_node((x, y), "farmland", amount)
+                resource = Resource(
+                    resource_type=ResourceType.FOOD_WHEAT,
+                    position=(x, y),
+                    quantity=amount,
+                    max_quantity=amount * 1.5,
+                    regrowth_rate=0.2
+                )
+                self.world.resource_manager.add_resource(resource)
         
         # Add initial resources to village storage
         initial_resources = {
-            "food": 100.0,
-            "wood": 80.0,
-            "stone": 50.0,
-            "iron_ore": 20.0,
-            "copper_ore": 15.0,
-            "iron_ingot": 10.0,
-            "tools": 5.0,
-            "weapons": 3.0
+            ResourceType.FOOD_WHEAT: 100.0,
+            ResourceType.WOOD: 80.0,
+            ResourceType.STONE: 50.0,
+            ResourceType.IRON_ORE: 20.0,
+            ResourceType.CLAY: 15.0,  # Using CLAY as copper ore
+            ResourceType.IRON_INGOT: 10.0,
+            ResourceType.BASIC_TOOLS: 5.0,
+            ResourceType.WEAPONS: 3.0
         }
         
         for resource_type, amount in initial_resources.items():
@@ -166,8 +201,11 @@ class Simulation:
                 x = center_x + random.randint(-5, 5)
                 y = center_y + random.randint(-5, 5)
                 
-                agent = Agent(f"Agent {agent_id}", (x, y), self.config)
+                agent = Agent(self.config, f"Agent {agent_id}")
                 agent_id += 1
+                
+                # Set the agent's position
+                agent.position = (x, y)
                 
                 # Initialize random skills
                 agent.skills = {
@@ -206,7 +244,10 @@ class Simulation:
                     job = FarmerJob()  # Default
                 
                 # Set job for agent
-                agent.set_job(job)
+                job.assign_to_agent(agent)
+                
+                # Initialize job_data for the agent
+                agent.job_data = job.job_specific_data.copy()
                 
                 # Add agent to world
                 self.world.add_agent(agent, x, y)
@@ -274,7 +315,8 @@ class Simulation:
                 action = agent.job.decide_action(agent, self.world)
                 if action:
                     agent.current_action = action
-                    agent.job.progress_action(agent, self.world, action)
+                    # Pass a time_delta of 1.0 to progress_action (standard step time)
+                    agent.job.progress_action(agent, self.world, 1.0)
     
     def render(self):
         """Render the current state of the simulation"""
@@ -376,7 +418,7 @@ class Simulation:
     
     def _render_storage_facilities(self, offset_x, offset_y):
         """Render storage facilities on the map"""
-        for facility in self.world.storage_manager.facilities:
+        for facility in self.world.storage_manager.storage_facilities:
             x, y = facility.position
             
             # Calculate screen position
@@ -509,7 +551,7 @@ class Simulation:
         y_pos += 20
         
         # Display storage information
-        for facility in self.world.storage_manager.facilities:
+        for facility in self.world.storage_manager.storage_facilities:
             facility_text = self.font.render(
                 f"{facility.__class__.__name__} at {facility.position}:", 
                 True, (220, 220, 220)
@@ -556,19 +598,10 @@ class Simulation:
         self.screen.blit(self.large_font.render(time_text, True, (255, 255, 0)), 
                        (self.screen_width - 250, 35))
     
-    def _get_resource_color(self, resource_type: str) -> Tuple[int, int, int]:
+    def _get_resource_color(self, resource_type: ResourceType) -> Tuple[int, int, int]:
         """Get color for a resource type"""
-        colors = {
-            "wood": (80, 50, 20),      # Brown
-            "stone": (120, 120, 120),  # Gray
-            "iron_ore": (160, 100, 80), # Rust
-            "copper_ore": (180, 120, 30), # Orange-brown
-            "food": (20, 180, 20),     # Green
-            "farmland": (100, 200, 80), # Light green
-            "water": (20, 80, 200)     # Blue
-        }
-        
-        return colors.get(resource_type, (255, 255, 255))  # Default white
+        # Use the built-in color method from ResourceType
+        return ResourceType.get_color(resource_type)
     
     def _get_job_color(self, job) -> Tuple[int, int, int]:
         """Get color for a job type"""

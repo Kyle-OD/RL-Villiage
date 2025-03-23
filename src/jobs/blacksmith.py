@@ -14,7 +14,7 @@ class BlacksmithJob(Job):
     
     def __init__(self):
         """Initialize the blacksmith job with skill modifiers and job-specific data"""
-        super().__init__("blacksmith")
+        super().__init__("blacksmith", "Crafts tools, weapons, and metal items from raw materials")
         
         # Skill modifiers for this job
         self.skill_modifiers = {
@@ -133,16 +133,21 @@ class BlacksmithJob(Job):
             # Not at forge, go there
             return "go_to_forge"
     
-    def progress_action(self, agent: Any, world: Any, action_name: str):
+    def progress_action(self, agent: Any, world: Any, time_delta: float):
         """
         Progress the current action forward.
         
         Args:
             agent: The agent performing the job
             world: The world environment
-            action_name: The name of the action to progress
+            time_delta: Time elapsed since last step
         """
-        if action_name == "go_to_forge":
+        # Get the current action from the agent
+        action_name = agent.current_action
+        
+        if action_name == "update_production_queue":
+            self._update_production_queue(agent, world)
+        elif action_name == "go_to_forge":
             self._progress_go_to_forge(agent, world)
         elif action_name == "get_resources":
             self._progress_get_resources(agent, world)

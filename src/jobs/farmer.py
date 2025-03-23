@@ -15,7 +15,7 @@ class FarmerJob(Job):
     def __init__(self):
         """Initialize the Farmer job"""
         super().__init__(
-            name="Farmer",
+            name="farmer",
             description="Grows and harvests crops to provide food for the village."
         )
         
